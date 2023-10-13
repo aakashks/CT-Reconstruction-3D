@@ -6,7 +6,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class CreateInterceptMatrix:
-    def __init__(self, detector_plate_length, source_to_object, source_to_detector, pixel_size, projections, resolution=None):
+    def __init__(self, detector_plate_length, source_to_object, source_to_detector, pixel_size, projections,
+                 resolution=None):
         """
         Parameters
         ----------
@@ -31,12 +32,10 @@ class CreateInterceptMatrix:
         self.phi = 2 * torch.pi / projections
         self.n = resolution if resolution is not None else detector_plate_length
 
-
     @staticmethod
     def write_iv_to_storage(indices, values):
         # write to 2 files indices and values
         pass
-
 
     def intercepts_for_ray(self, ray_coord, phi):
         """
@@ -54,8 +53,10 @@ class CreateInterceptMatrix:
 
         # creating the grid of voxels
         x = torch.arange(-n // 2, n // 2, 1) if n % 2 == 0 else torch.arange(-n, n + 1, 2) / 2
-        x = x.to(torch.float16)
+        x = x.to(torch.float16) * ps
         X, Y, Z = torch.meshgrid(x, x, x, indexing='ij')
+
+        phi = torch.tensor(phi)
 
         # line slopes
         x_line_slope = sod * torch.sin(phi) - alpha
@@ -64,14 +65,14 @@ class CreateInterceptMatrix:
         # Defining equations which will generate lines
         def xy_from_z(z):
             z = z.to(device)
-            x = alpha + z * x_line_slope / (z_line_slope)
-            y = beta - z * beta / (z_line_slope)
+            x = alpha + z * x_line_slope / z_line_slope
+            y = beta - z * beta / z_line_slope
             return x.to('cpu'), y.to('cpu')
 
         def yz_from_x(x):
             x = x.to(device)
             y = beta - beta * (x - alpha) / x_line_slope
-            z = (x - alpha) * z_line_slope / (x_line_slope)
+            z = (x - alpha) * z_line_slope / x_line_slope
             return y.to('cpu'), z.to('cpu')
 
         def zx_from_y(y):
@@ -99,22 +100,21 @@ class CreateInterceptMatrix:
         mask5 = (X <= X5) & (X5 < X + 1) & (Z <= Z5) & (Z5 < Z + 1)
         mask6 = (X <= X6) & (X6 < X + 1) & (Z <= Z6) & (Z6 < Z + 1)
 
-        I1 = torch.stack([mask1 * X1,       mask1 * Y1,         mask1 * Z], 4)
-        I2 = torch.stack([mask2 * X2,       mask2 * Y2,         mask2 * (Z + 1)], 4)
-        I3 = torch.stack([mask3 * X,        mask3 * Y3,         mask3 * Z3], 4)
-        I4 = torch.stack([mask4 * (X + 1),  mask4 * Y4,         mask4 * Z4], 4)
-        I5 = torch.stack([mask5 * X5,       mask5 * Y,          mask5 * Z5], 4)
-        I6 = torch.stack([mask6 * X6,       mask6 * (Y + 1),    mask6 * Z6], 4)
+        I1 = torch.stack([mask1 * X1, mask1 * Y1, mask1 * Z], 3)
+        I2 = torch.stack([mask2 * X2, mask2 * Y2, mask2 * (Z + 1)], 3)
+        I3 = torch.stack([mask3 * X, mask3 * Y3, mask3 * Z3], 3)
+        I4 = torch.stack([mask4 * (X + 1), mask4 * Y4, mask4 * Z4], 3)
+        I5 = torch.stack([mask5 * X5, mask5 * Y, mask5 * Z5], 3)
+        I6 = torch.stack([mask6 * X6, mask6 * (Y + 1), mask6 * Z6], 3)
 
         # To get length of line from all these intercept coordinates
         intercept_coordinates = torch.abs(torch.abs(torch.abs(I1 - I2) - torch.abs(I3 - I4)) - torch.abs(I5 - I6))
 
         # now squaring will give the length
-        intercept_matrix = torch.linalg.norm(intercept_coordinates, dim=3) * ps
+        intercept_matrix = torch.linalg.norm(intercept_coordinates, dim=3)
 
         # change to 1d vector
         # return intercept_matrix.to_sparse_coo().to(device='cpu', dtype=torch.float16)
-
 
     def generate_rays(self, phi):
         """
@@ -132,8 +132,8 @@ class CreateInterceptMatrix:
         s = torch.sin(phi)
         a = detector_coords[:, 0:1]
         b = detector_coords[:, 1:2]
-        alphas = (a*lambd + lambd * mu * s)/(a*s + mu + lambd*c**2)
-        betas = b.reshape(1, -1) / (1 - (mu + alphas*s)/(alphas*s - lambd))
+        alphas = (a * lambd + lambd * mu * s) / (a * s + mu + lambd * c ** 2)
+        betas = b.reshape(1, -1) / (1 - (mu + alphas * s) / (alphas * s - lambd))
 
         line_params_tensor = torch.stack([alphas, betas], 2).reshape(-1, 2)
 
@@ -163,7 +163,6 @@ class CreateInterceptMatrix:
 
         # write the indices and values in storage
         self.write_iv_to_storage(indices, values)
-
 
     def create_intercept_matrix_from_lines(self):
 

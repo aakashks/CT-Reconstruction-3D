@@ -5,4 +5,3 @@ json
 pandas
 tqdm
 torch
-tifffile
