@@ -1,4 +1,6 @@
 import gc
+
+import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -19,6 +21,8 @@ class CreateInterceptMatrix:
             source to any detector's centre (all detectors should be equidistance from source)
         pixel_size
             size of 1 pixel unit in the grid of pixels (of both object and detector, which is an ASSUMPTION)
+        projections
+            total no of projections taken (rotations taken)
         resolution
             ASSUMING same resolution along all axis
         dtype
@@ -37,14 +41,14 @@ class CreateInterceptMatrix:
         self.dtype = dtype
 
     @staticmethod
-    def write_iv_to_storage(sparse_tensor, rot_no):
+    def write_iv_to_storage(indices, values, rot_no):
         # write to 2 files indices and values
-        torch.save(sparse_tensor.indices(), f'indices_rot{rot_no}.pt')
-        torch.save(sparse_tensor.values(), f'values_rot{rot_no}.pt')
+        torch.save(indices, f'indices_rot{rot_no}.pt')
+        torch.save(values, f'values_rot{rot_no}.pt')
 
     def intercepts_for_rays(self, ray_coords, dtype=None):
         """
-        get all voxel intercepts for 1 ray or a minibatch of rays
+        get all voxel intercepts for 1 ray or a batch of rays
         batches should be on one ray param only for eg. beta only
         line parameters are taken using centre of object as origin
 
@@ -55,18 +59,19 @@ class CreateInterceptMatrix:
 
         Returns
         -------
-        sparse_coo Tensor object. shape (batches, n, n, n)
-         n x n x n voxels
+        sparse_coo Tensor object. size (batches, n*n*n).
+        where for each batch / row X, Y, Z are flat indexed as they are expected to be
         """
-        alpha, beta, phi = (ray_coords[:, 0].view(-1, 1, 1, 1),
-                            ray_coords[:, 1].view(-1, 1, 1, 1),
-                            ray_coords[:, 2].view(-1, 1, 1, 1))
+
+        phi, alpha, betas = (ray_coords[0].view(-1, 1),
+                            ray_coords[1].view(-1, 1),
+                            ray_coords[2].view(-1, 1))
 
         # option to change data type within method
         dtype = dtype if dtype is not None else self.dtype
 
         alpha = alpha.to(device, dtype)
-        beta = beta.to(device, dtype)
+        betas = betas.to(device, dtype)
         phi = phi.to(device, dtype)
 
         # each pixel is represented by its bottom left corner coordinate
@@ -76,7 +81,12 @@ class CreateInterceptMatrix:
 
         # creating the grid of voxels
         a = torch.arange(-n // 2, n // 2, 1, device=device, dtype=dtype) * ps
-        X, Y, Z = torch.meshgrid(a, a, a, indexing='ij')
+        X, Y, Z = torch.meshgrid(a, a, a, indexing='xy')
+
+        # flatten
+        X = X.flatten().view(1, -1)
+        Y = Y.flatten().view(1, -1)
+        Z = Z.flatten().view(1, -1)
 
         # slopes in parametric form of the 3d ray
         x_line_slope = sod * torch.sin(phi) - alpha
@@ -85,19 +95,20 @@ class CreateInterceptMatrix:
         # Defining equations which will generate rays acc to the parametric form
         def xy_from_z(z):
             return (alpha + z * x_line_slope / z_line_slope,
-                    beta - z * beta / z_line_slope)
+                    betas - z * betas / z_line_slope)
 
         def yz_from_x(x):
-            return (beta - beta * (x - alpha) / x_line_slope,
+            return (betas - betas * (x - alpha) / x_line_slope,
                     (x - alpha) * z_line_slope / x_line_slope)
 
         def zx_from_y(y):
-            return (-z_line_slope * (y - beta) / beta,
-                    alpha - x_line_slope * (y - beta) / beta)
+            return (-z_line_slope * (y - betas) / betas,
+                    alpha - x_line_slope * (y - betas) / betas)
 
         # find intercept coordinates at planes
         def intercepts_z_plane(x0, y0, z):
             x, y = xy_from_z(z)
+            # only True value locations are stored in mask (sparse)
             mask = ((x0 <= x) & (x < x0 + ps) & (y0 <= y) & (y < y0 + ps)).to_sparse_coo()
             del x0, y0
             i = torch.stack([mask * x, mask * y, mask * z], 0)
@@ -125,7 +136,7 @@ class CreateInterceptMatrix:
         C2 = torch.abs(intercepts_y_plane(X, Y, Z) - intercepts_y_plane(X, Y + ps, Z))
         C3 = torch.abs(intercepts_x_plane(X, Y, Z) - intercepts_x_plane(X + ps, Y, Z))
 
-        del X, Y, Z, alpha, beta, phi, x_line_slope, z_line_slope
+        del X, Y, Z, alpha, betas, phi, x_line_slope, z_line_slope
 
         # To get length of line from all these intercept coordinates
         # first we take |x2 - x1|
@@ -145,58 +156,74 @@ class CreateInterceptMatrix:
     def generate_rays(self, phis, dtype=torch.float32):
         """
         generate rays from source to each detector for a rotation angle of phi
+        returns shape (3, phis, alphas, betas)
+        where alphas = betas = dl = n
         """
         n = self.dl
         ps = self.ps
         x = torch.arange(-n + 1, n, 2, device=device, dtype=dtype) / 2 * ps
-        detector_coords = torch.dstack(torch.meshgrid(x, x)).reshape(-1, 2)
+        detector_coords = torch.stack(torch.meshgrid(x, x, indexing='xy'), 0)
+
+        phis = phis.to(device, dtype).reshape(-1, 1, 1)
 
         mu = self.sdd - self.sod
         lambd = self.sod
         c = torch.cos(phis)
         s = torch.sin(phis)
-        a = detector_coords[:, 0:1]
-        b = detector_coords[:, 1:2]
+        a = detector_coords[0]
+        b = detector_coords[1]
         alphas = (a * lambd + lambd * mu * s) / (a * s + mu + lambd * c ** 2)
-        betas = b.reshape(1, -1) / (1 - (mu + alphas * s) / (alphas * s - lambd))
+        betas = b / (1 - (mu + alphas * s) / (alphas * s - lambd))
 
         phis = phis + torch.zeros_like(alphas)
-        line_params_tensor = torch.stack([alphas, betas, phis], 2).reshape(-1, 3)
+        line_params_tensor = torch.stack([phis, alphas, betas], 0)
 
         gc.collect()
         torch.cuda.empty_cache()
         return line_params_tensor.to('cpu')
 
-    def intercept_matrix_per(self, rotation):
-        angle = rotation * self.phi
-        n2 = self.n * self.n
-        all_rays_for_1_rotation = self.generate_rays(angle)  # (n*n, 3)
+    def intercept_matrix_per(self, rotation, k, all_rays_rot):
+        """
+        for only 1 rotation
+        write to storage sparse tensor of shape (alphas, betas, x, y, z)
+        x = y = z = n
+        with approx n elements for each (alphas, betas, :)
+
+        all_rays_rot
+            all rays for 1 rotation. shape (3, alphas, betas)
+
+        k
+            no of betas together
+            a suitable value for n=200 can be 100 for colab, 200 for kaggle (16GBs). 50 for 8GB
+        """
+        assert self.n % k == 0
 
         # store indices and values of sparse matrix
-        indices = torch.empty(size=[2, 0])
-        values = torch.empty(size=[0])
+        indices = torch.empty(size=[2, 0]).to(device)
+        values = torch.empty(size=[0]).to(device)
 
-        for i in range(n2):
-            # sparse vector which is 1 row of intercept matrix
-            intercept_row_for_each_ray_sparse = self.intercepts_for_ray(all_rays_for_1_rotation[i], angle)  # (1, -)
+        for alpha_i in range(self.n):
+            for betas_i in range(self.n / k):
+                k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i*self.n:(betas_i+1)*self.n])
+                new_indices = k_rows.indices().to(device)
 
-            # according to i and rotation, decide the indices[0] and concatenate it
-            new_indices = intercept_row_for_each_ray_sparse.indices()
-            new_indices[0] = i + n2 * rotation
+                new_indices[0] = new_indices[0] + rotation*self.n*self.n + alpha_i*self.n + betas_i*k
+                indices = torch.cat([indices, new_indices], dim=1)
+                values = torch.cat([values, k_rows.values()])
 
-            indices = torch.cat([indices, new_indices], dim=1)
-            values = torch.cat([values, intercept_row_for_each_ray_sparse.values()])
+                del k_rows, new_indices
 
-            del intercept_row_for_each_ray_sparse, new_indices
+            # write the indices and values in storage
+        self.write_iv_to_storage(indices.cpu(), values.cpu(), rotation)
 
-        # write the indices and values in storage
-        self.write_iv_to_storage(indices, values)
+    def create_intercept_matrix_from_lines(self, rot_start, rot_end, k, dtype=torch.float32):
 
-    def create_intercept_matrix_from_lines(self):
+        phis = torch.arange(self.p) * self.phi
+        all_rays = self.generate_rays(phis, dtype=dtype)
 
-        for rotation in tqdm(range(self.p), desc='Generating matrix: rotation-'):
+        for rotation in tqdm(range(rot_start, rot_end), desc='Generating matrix: rotation-'):
             # for a rotation
-            self.intercept_matrix_per(rotation)
+            self.intercept_matrix_per(rotation, k, all_rays[:, rotation, :, :])
             # clean up memory
-            torch.cuda.empty_cache()
             gc.collect()
+            torch.cuda.empty_cache()
