@@ -1,6 +1,28 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import time, gc
 import seaborn as sns
+
+
+# Measure GPU performance
+# measure performance of any function
+def measure_performance(func, repeats=10, *args, **kwargs):
+    time_taken = []
+    for _ in range(repeats):
+        t0 = time.time()
+        func(*args, **kwargs)
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        execution_time = time.time() - t0
+        time_taken.append(execution_time)
+
+    time_taken = torch.tensor(time_taken)
+    print(f'--- Time metrics for {func.__name__} ---')
+    print(f'Mean   = {time_taken.mean().item():.3f}s')
+    print(f'Median = {time_taken.median().item():.3f}s')
+    print(f'Max    = {time_taken.max().item():.3f}s')
 
 
 # Plotting Utility functions
