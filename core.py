@@ -42,15 +42,27 @@ class CreateInterceptMatrix:
         torch.save(sparse_tensor.indices(), f'indices_rot{rot_no}.pt')
         torch.save(sparse_tensor.values(), f'values_rot{rot_no}.pt')
 
-    def intercepts_for_ray(self, ray_coords, dtype=None):
+    def intercepts_for_rays(self, ray_coords, dtype=None):
         """
-        get all voxel intercepts for 1 ray
+        get all voxel intercepts for 1 ray or a minibatch of rays
+        batches should be on one ray param only for eg. beta only
         line parameters are taken using centre of object as origin
+
+        Parameters
+        ----------
+        ray_coords
+            must be torch tensor on cpu
+
+        Returns
+        -------
+        sparse_coo Tensor object. shape (batches, n, n, n)
+         n x n x n voxels
         """
         alpha, beta, phi = (ray_coords[:, 0].view(-1, 1, 1, 1),
                             ray_coords[:, 1].view(-1, 1, 1, 1),
                             ray_coords[:, 2].view(-1, 1, 1, 1))
 
+        # option to change data type within method
         dtype = dtype if dtype is not None else self.dtype
 
         alpha = alpha.to(device, dtype)
@@ -63,15 +75,14 @@ class CreateInterceptMatrix:
         sod = self.sod
 
         # creating the grid of voxels
-        assert n % 2 == 0
         a = torch.arange(-n // 2, n // 2, 1, device=device, dtype=dtype) * ps
         X, Y, Z = torch.meshgrid(a, a, a, indexing='ij')
 
-        # line slopes
+        # slopes in parametric form of the 3d ray
         x_line_slope = sod * torch.sin(phi) - alpha
         z_line_slope = sod * torch.cos(phi)
 
-        # Defining equations which will generate lines
+        # Defining equations which will generate rays acc to the parametric form
         def xy_from_z(z):
             return (alpha + z * x_line_slope / z_line_slope,
                     beta - z * beta / z_line_slope)
@@ -84,6 +95,7 @@ class CreateInterceptMatrix:
             return (-z_line_slope * (y - beta) / beta,
                     alpha - x_line_slope * (y - beta) / beta)
 
+        # find intercept coordinates at planes
         def intercepts_z_plane(x0, y0, z):
             x, y = xy_from_z(z)
             mask = ((x0 <= x) & (x < x0 + ps) & (y0 <= y) & (y < y0 + ps)).to_sparse_coo()
@@ -108,7 +120,7 @@ class CreateInterceptMatrix:
             del mask, x, y, z
             return i
 
-        # Get line intercepts with 6 boundaries of each voxel
+        # get intercepts with 6 boundaries of each voxel
         C1 = torch.abs(intercepts_z_plane(X, Y, Z) - intercepts_z_plane(X, Y, Z + ps))
         C2 = torch.abs(intercepts_y_plane(X, Y, Z) - intercepts_y_plane(X, Y + ps, Z))
         C3 = torch.abs(intercepts_x_plane(X, Y, Z) - intercepts_x_plane(X + ps, Y, Z))
@@ -116,13 +128,14 @@ class CreateInterceptMatrix:
         del X, Y, Z, alpha, beta, phi, x_line_slope, z_line_slope
 
         # To get length of line from all these intercept coordinates
+        # first we take |x2 - x1|
         ic = torch.abs(torch.abs(C1 - C2) - C3)
         del C1, C2, C3
         # now squaring will give the length
         intercept_lengths = torch.sqrt(ic[0] ** 2 + ic[1] ** 2 + ic[2] ** 2)
         del ic
 
-        # change to 1d vector
+        # move from GPU
         il = intercept_lengths.to('cpu')
         del intercept_lengths
         gc.collect()
