@@ -1,5 +1,5 @@
-import torch
 import gc
+import torch
 from tqdm import tqdm
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -7,7 +7,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class CreateInterceptMatrix:
     def __init__(self, detector_plate_length, source_to_object, source_to_detector, pixel_size, projections,
-                 resolution=None):
+                 dtype=torch.float32, resolution=None):
         """
         Parameters
         ----------
@@ -21,6 +21,8 @@ class CreateInterceptMatrix:
             size of 1 pixel unit in the grid of pixels (of both object and detector, which is an ASSUMPTION)
         resolution
             ASSUMING same resolution along all axis
+        dtype
+            float16 gives bad precision. error of 1mm can occur. prefer using float32 unless facing gpu ram shortage
         """
         self.dl = detector_plate_length
         self.sod = source_to_object
@@ -31,22 +33,29 @@ class CreateInterceptMatrix:
         # Assumption: maximum angle is 2pi
         self.phi = 2 * torch.pi / projections
         self.n = resolution if resolution is not None else detector_plate_length
+        assert self.n % 2 == 0
+        self.dtype = dtype
 
     @staticmethod
-    def write_iv_to_storage(indices, values):
+    def write_iv_to_storage(sparse_tensor, rot_no):
         # write to 2 files indices and values
-        pass
+        torch.save(sparse_tensor.indices(), f'indices_rot{rot_no}.pt')
+        torch.save(sparse_tensor.values(), f'values_rot{rot_no}.pt')
 
-    def intercepts_for_ray(self, ray_coords):
+    def intercepts_for_ray(self, ray_coords, dtype=None):
         """
         get all voxel intercepts for 1 ray
         line parameters are taken using centre of object as origin
         """
-        alpha, beta, phi = ray_coords[:, 0].view(-1, 1, 1, 1), ray_coords[:, 1].view(-1, 1, 1, 1), ray_coords[:, 2].view(-1, 1, 1, 1)
+        alpha, beta, phi = (ray_coords[:, 0].view(-1, 1, 1, 1),
+                            ray_coords[:, 1].view(-1, 1, 1, 1),
+                            ray_coords[:, 2].view(-1, 1, 1, 1))
 
-        alpha = alpha.to(device, torch.float16)
-        beta = beta.to(device, torch.float16)
-        phi = phi.to(device, torch.float16)
+        dtype = dtype if dtype is not None else self.dtype
+
+        alpha = alpha.to(device, dtype)
+        beta = beta.to(device, dtype)
+        phi = phi.to(device, dtype)
 
         # each pixel is represented by its bottom left corner coordinate
         ps = self.ps
@@ -55,8 +64,8 @@ class CreateInterceptMatrix:
 
         # creating the grid of voxels
         assert n % 2 == 0
-        x = torch.arange(-n // 2, n // 2, 1, device=device, dtype=torch.float16) * ps
-        X, Y, Z = torch.meshgrid(x, x, x, indexing='ij')
+        a = torch.arange(-n // 2, n // 2, 1, device=device, dtype=dtype) * ps
+        X, Y, Z = torch.meshgrid(a, a, a, indexing='ij')
 
         # line slopes
         x_line_slope = sod * torch.sin(phi) - alpha
@@ -76,7 +85,6 @@ class CreateInterceptMatrix:
                     alpha - x_line_slope * (y - beta) / beta)
 
         def intercepts_z_plane(x0, y0, z):
-            z = z.to(device)
             x, y = xy_from_z(z)
             mask = ((x0 <= x) & (x < x0 + ps) & (y0 <= y) & (y < y0 + ps)).to_sparse_coo()
             del x0, y0
@@ -85,7 +93,6 @@ class CreateInterceptMatrix:
             return i
 
         def intercepts_x_plane(x, y0, z0):
-            x = x.to(device)
             y, z = yz_from_x(x)
             mask = ((y0 <= y) & (y < y0 + ps) & (z0 <= z) & (z < z0 + ps)).to_sparse_coo()
             del y0, z0
@@ -94,7 +101,6 @@ class CreateInterceptMatrix:
             return i
 
         def intercepts_y_plane(x0, y, z0):
-            y = y.to(device)
             z, x = zx_from_y(y)
             mask = ((x0 <= x) & (x < x0 + ps) & (z0 <= z) & (z < z0 + ps)).to_sparse_coo()
             del x0, z0
@@ -123,14 +129,13 @@ class CreateInterceptMatrix:
         torch.cuda.empty_cache()
         return il
 
-    def generate_rays(self, phis):
+    def generate_rays(self, phis, dtype=torch.float32):
         """
         generate rays from source to each detector for a rotation angle of phi
         """
         n = self.dl
-        p = self.ps
-        x = torch.arange(-n + 1, n, 2) / 2 * p if n % 2 == 0 else torch.arange((-n + 1) // 2, (n + 1) // 2) * p
-        x = x.to(device, torch.float32)
+        ps = self.ps
+        x = torch.arange(-n + 1, n, 2, device=device, dtype=dtype) / 2 * ps
         detector_coords = torch.dstack(torch.meshgrid(x, x)).reshape(-1, 2)
 
         mu = self.sdd - self.sod
@@ -152,7 +157,7 @@ class CreateInterceptMatrix:
     def intercept_matrix_per(self, rotation):
         angle = rotation * self.phi
         n2 = self.n * self.n
-        all_rays_for_1_rotation = self.generate_rays(angle)  # (n*n, 2)
+        all_rays_for_1_rotation = self.generate_rays(angle)  # (n*n, 3)
 
         # store indices and values of sparse matrix
         indices = torch.empty(size=[2, 0])
