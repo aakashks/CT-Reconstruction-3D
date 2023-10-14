@@ -1,6 +1,4 @@
 import gc
-
-import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -178,6 +176,7 @@ class CreateInterceptMatrix:
         phis = phis + torch.zeros_like(alphas)
         line_params_tensor = torch.stack([phis, alphas, betas], 0)
 
+        del phis, alphas, betas, a, b, detector_coords, c, s, x
         gc.collect()
         torch.cuda.empty_cache()
         return line_params_tensor.to('cpu')
@@ -199,13 +198,14 @@ class CreateInterceptMatrix:
         assert self.n % k == 0
 
         # store indices and values of sparse matrix
-        indices = torch.empty(size=[2, 0]).to(device)
-        values = torch.empty(size=[0]).to(device)
+        indices = torch.empty(size=[2, 0])
+        values = torch.empty(size=[0])
 
-        for alpha_i in range(self.n):
-            for betas_i in range(self.n / k):
-                k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i*self.n:(betas_i+1)*self.n])
-                new_indices = k_rows.indices().to(device)
+        for alpha_i in tqdm(range(self.n), leave=False):
+            for betas_i in range(self.n // k):
+                # peak GPU RAM usage
+                k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i*k:(betas_i+1)*k])
+                new_indices = k_rows.indices()
 
                 new_indices[0] = new_indices[0] + rotation*self.n*self.n + alpha_i*self.n + betas_i*k
                 indices = torch.cat([indices, new_indices], dim=1)
@@ -214,12 +214,14 @@ class CreateInterceptMatrix:
                 del k_rows, new_indices
 
             # write the indices and values in storage
-        self.write_iv_to_storage(indices.cpu(), values.cpu(), rotation)
+        self.write_iv_to_storage(indices, values, rotation)
 
-    def create_intercept_matrix_from_lines(self, rot_start, rot_end, k, dtype=torch.float32):
+    def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float32):
 
         phis = torch.arange(self.p) * self.phi
         all_rays = self.generate_rays(phis, dtype=dtype)
+        gc.collect()
+        torch.cuda.empty_cache()
 
         for rotation in tqdm(range(rot_start, rot_end), desc='Generating matrix: rotation-'):
             # for a rotation
