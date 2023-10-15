@@ -9,7 +9,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class CreateInterceptMatrix:
     def __init__(self, detector_plate_length, source_to_object, source_to_detector, pixel_size, projections,
-                 dtype=torch.float16, resolution=None):
+                 dtype=torch.float32, resolution=None):
         """
         Parameters
         ----------
@@ -26,11 +26,11 @@ class CreateInterceptMatrix:
         resolution
             ASSUMING same resolution along all axis
         dtype
-            float16 gives bad precision for larger ps value, use it only if the whole space is being scaled
-            because float16 operations are faster than float32 on GPU
+            float16 gives bad precision, distorted images
+            prefer using float32 only
         """
         self.dl = detector_plate_length
-        # deliberatly scaling my space by factor of 1/100 so that precision in float16 is better
+        # deliberatly scaling my space by factor of 1/100 so that precision in float32 is better
         self.sod = source_to_object / 100
         self.sdd = source_to_detector / 100
         self.ps = pixel_size / 100
@@ -158,7 +158,7 @@ class CreateInterceptMatrix:
         torch.cuda.empty_cache()
         return il
 
-    def generate_rays(self, phis, dtype=torch.float16):
+    def generate_rays(self, phis, dtype=torch.float32):
         """
         generate rays from source to each detector for a rotation angle of phi
         returns shape (3, phis, alphas, betas)
@@ -188,7 +188,7 @@ class CreateInterceptMatrix:
         torch.cuda.empty_cache()
         return line_params_tensor.to('cpu')
 
-    def intercept_matrix_per(self, rotation, k, all_rays_rot, dtype=torch.float16):
+    def intercept_matrix_per(self, rotation, k, all_rays_rot, dtype=torch.float32):
         """
         for only 1 rotation
         write to storage sparse tensor of shape (alphas, betas, x, y, z)
@@ -223,7 +223,7 @@ class CreateInterceptMatrix:
         self.write_iv_to_storage(sparse_matrix, rotation)
         del sparse_matrix
 
-    def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float16):
+    def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float32):
         """
         stores few rows of the intercept matrix
         indexing is assumed as follows
