@@ -1,7 +1,8 @@
 import gc
+import logging
+
 import torch
 from tqdm.auto import tqdm
-import logging
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -68,8 +69,8 @@ class CreateInterceptMatrix:
         """
 
         phi, alpha, betas = (ray_coords[0].view(-1, 1),
-                            ray_coords[1].view(-1, 1),
-                            ray_coords[2].view(-1, 1))
+                             ray_coords[1].view(-1, 1),
+                             ray_coords[2].view(-1, 1))
 
         # option to change data type within method
         dtype = dtype if dtype is not None else self.dtype
@@ -204,29 +205,21 @@ class CreateInterceptMatrix:
         """
         assert self.n % k == 0
 
-        # sparse_matrix = torch.sparse_coo_tensor(size=[0, self.n**3], dtype=dtype)
-        # store indices and values of sparse matrix
-        indices = torch.empty(size=[2, 0])
-        values = torch.empty(size=[0])
+        sparse_matrix = torch.sparse_coo_tensor(size=[0, self.n**3], dtype=dtype)
 
         for alpha_i in tqdm(range(self.dl), leave=False):
             for betas_i in range(self.dl // k):
                 # peak GPU RAM usage
-                k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i*k:(betas_i+1)*k])
-                new_indices = k_rows.indices()
-                new_indices[0] = new_indices[0] + alpha_i*self.n + betas_i*k
-                indices = torch.cat([indices, new_indices], dim=1)
-                values = torch.cat([values, k_rows.values()])
+                k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i * k:(betas_i + 1) * k])
 
-                # # concatenating increments size at that dimension and automatically adjusts the indices
-                # sparse_matrix = torch.cat([sparse_matrix, k_rows])
+                # concatenating increments size at that dimension and automatically adjusts the indices
+                sparse_matrix = torch.cat([sparse_matrix, k_rows])
 
                 del k_rows
 
             # write the indices and values in storage
 
         logging.debug(f'rotation {rotation} completed')
-        sparse_matrix = torch.sparse_coo_tensor(indices, values, size=[self.dl*self.dl, self.n**3], dtype=dtype)
         self.write_iv_to_storage(sparse_matrix, rotation)
         del sparse_matrix
 
