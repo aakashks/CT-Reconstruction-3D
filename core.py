@@ -1,6 +1,7 @@
 import gc
 import torch
 from tqdm import tqdm
+import logging
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -44,6 +45,7 @@ class CreateInterceptMatrix:
     def write_iv_to_storage(sparse_matrix, rot_no):
         # write to 2 files indices and values
         torch.save(sparse_matrix, f'matrix_rot_{rot_no}.pt')
+        del sparse_matrix
 
     def intercepts_for_rays(self, ray_coords, dtype=None):
         """
@@ -163,7 +165,7 @@ class CreateInterceptMatrix:
         x = torch.arange((-n + 1) * ps, n * ps, 2 * ps, device=device, dtype=dtype) / 2
         detector_coords = torch.stack(torch.meshgrid(x, x, indexing='xy'), 0)
 
-        phis = phis.to(device, dtype).reshape(-1, 1, 1)
+        phis = phis.to(device, dtype).view(-1, 1, 1)
 
         mu = self.sdd - self.sod
         lambd = self.sod
@@ -194,7 +196,7 @@ class CreateInterceptMatrix:
 
         k
             no of betas together
-            a suitable value for n=200 can be 100 for colab, 200 for kaggle (16GBs). 50 for 8GB
+            a suitable value can be 100 for colab and kaggle (16GBs). 50 for 8GB (on n=200 case)
         """
         assert self.n % k == 0
 
@@ -215,7 +217,10 @@ class CreateInterceptMatrix:
                 del k_rows, new_indices
 
             # write the indices and values in storage
+
+        logging.debug(f'rotation {rotation} completed, created matrix of size {len(sparse_matrix.values())}')
         self.write_iv_to_storage(sparse_matrix, rotation)
+        del sparse_matrix
 
     def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float16):
         """
