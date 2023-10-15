@@ -38,7 +38,10 @@ class CreateInterceptMatrix:
         # Assumption: maximum angle is 2pi
         self.phi = 2 * torch.pi / projections
         self.n = resolution if resolution is not None else detector_plate_length
-        assert self.n % 2 == 0
+        if self.n != self.dl:
+            logging.warning('different detector length and resolution arent supported yet, so might cause errors')
+
+        assert self.n % 2 == 0, 'if needed revert changes from previous commit'
         self.dtype = dtype
 
     @staticmethod
@@ -197,28 +200,25 @@ class CreateInterceptMatrix:
         k
             no of betas together
             a suitable value can be 100 for colab and kaggle (16GBs). 50 for 8GB (on n=200 case)
+
         """
         assert self.n % k == 0
 
-        # full size of the final intercept matrix
-        full_size = torch.Size([self.p * self.dl * self.dl, self.n ** 3])
-        sparse_matrix = torch.sparse_coo_tensor(full_size, dtype=dtype)
+        sparse_matrix = torch.sparse_coo_tensor(size=[0, self.n**3], dtype=dtype)
 
-        for alpha_i in tqdm(range(self.n), leave=False):
-            for betas_i in range(self.n // k):
+        for alpha_i in tqdm(range(self.dl), leave=False):
+            for betas_i in range(self.dl // k):
                 # peak GPU RAM usage
                 k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i*k:(betas_i+1)*k])
-                new_indices = k_rows.indices()
 
-                new_indices[0] = new_indices[0] + rotation*self.n*self.n + alpha_i*self.n + betas_i*k
+                # concatenating increments size at that dimension and automatically adjusts the indices
+                sparse_matrix = torch.cat([sparse_matrix, k_rows])
 
-                sparse_matrix = torch.cat([sparse_matrix, torch.sparse_coo_tensor(new_indices, k_rows.values(), full_size, dtype=dtype)])
-
-                del k_rows, new_indices
+                del k_rows
 
             # write the indices and values in storage
 
-        logging.debug(f'rotation {rotation} completed, created matrix of size {len(sparse_matrix.values())}')
+        logging.debug(f'rotation {rotation} completed')
         self.write_iv_to_storage(sparse_matrix, rotation)
         del sparse_matrix
 
