@@ -1,5 +1,4 @@
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import time, gc
 import seaborn as sns
@@ -49,7 +48,7 @@ def plot_2d_images(
             [recon_img, orig_img] = [
                 (x - x.min()) / (x.max() - x.min()) for x in [recon_img, orig_img]
             ]
-        rmse = np.sqrt(np.mean((recon_img - orig_img) ** 2))
+        rmse = torch.sqrt(torch.mean((recon_img - orig_img) ** 2))
         plt.suptitle(f"{title}RMSE: {rmse:.4f}", y=1.02)
 
     plt.show()
