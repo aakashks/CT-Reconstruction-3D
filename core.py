@@ -7,7 +7,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class CreateInterceptMatrix:
     def __init__(self, detector_plate_length, source_to_object, source_to_detector, pixel_size, projections,
-                 dtype=torch.float32, resolution=None):
+                 dtype=torch.float16, resolution=None):
         """
         Parameters
         ----------
@@ -24,12 +24,14 @@ class CreateInterceptMatrix:
         resolution
             ASSUMING same resolution along all axis
         dtype
-            float16 gives bad precision. error of 1mm can occur. prefer using float32 unless facing gpu ram shortage
+            float16 gives bad precision for larger ps value, use it only if the whole space is being scaled
+            because float16 operations are faster than float32 on GPU
         """
         self.dl = detector_plate_length
-        self.sod = source_to_object
-        self.sdd = source_to_detector
-        self.ps = pixel_size
+        # deliberatly scaling my space by factor of 1/100 so that precision in float16 is better
+        self.sod = source_to_object / 100
+        self.sdd = source_to_detector / 100
+        self.ps = pixel_size / 100
         self.p = projections
 
         # Assumption: maximum angle is 2pi
@@ -77,7 +79,7 @@ class CreateInterceptMatrix:
         sod = self.sod
 
         # creating the grid of voxels
-        a = torch.arange(-n // 2, n // 2, 1, device=device, dtype=dtype) * ps
+        a = torch.arange((-n // 2) * ps, (n // 2) * ps, ps, device=device, dtype=dtype)
         X, Y, Z = torch.meshgrid(a, a, a, indexing='xy')
 
         # flatten
@@ -150,7 +152,7 @@ class CreateInterceptMatrix:
         torch.cuda.empty_cache()
         return il
 
-    def generate_rays(self, phis, dtype=torch.float32):
+    def generate_rays(self, phis, dtype=torch.float16):
         """
         generate rays from source to each detector for a rotation angle of phi
         returns shape (3, phis, alphas, betas)
@@ -158,7 +160,7 @@ class CreateInterceptMatrix:
         """
         n = self.dl
         ps = self.ps
-        x = torch.arange(-n + 1, n, 2, device=device, dtype=dtype) / 2 * ps
+        x = torch.arange((-n + 1) * ps, n * ps, 2 * ps, device=device, dtype=dtype) / 2
         detector_coords = torch.stack(torch.meshgrid(x, x, indexing='xy'), 0)
 
         phis = phis.to(device, dtype).reshape(-1, 1, 1)
@@ -180,7 +182,7 @@ class CreateInterceptMatrix:
         torch.cuda.empty_cache()
         return line_params_tensor.to('cpu')
 
-    def intercept_matrix_per(self, rotation, k, all_rays_rot, dtype=torch.float32):
+    def intercept_matrix_per(self, rotation, k, all_rays_rot, dtype=torch.float16):
         """
         for only 1 rotation
         write to storage sparse tensor of shape (alphas, betas, x, y, z)
@@ -215,7 +217,13 @@ class CreateInterceptMatrix:
             # write the indices and values in storage
         self.write_iv_to_storage(sparse_matrix, rotation)
 
-    def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float32):
+    def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float16):
+        """
+        stores few rows of the intercept matrix
+        indexing is assumed as follows
+        for each row (x, y, z).flatten()
+        and rows are (phis, alphas, betas).flatten()
+        """
 
         phis = torch.arange(self.p) * self.phi
         all_rays = self.generate_rays(phis, dtype=dtype)
