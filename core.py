@@ -223,7 +223,7 @@ class CreateInterceptMatrix:
         self.write_iv_to_storage(sparse_matrix, rotation)
         del sparse_matrix
 
-    def create_intercept_rows(self, rot_start, rot_end, k, dtype=torch.float32):
+    def create_intercept_rows(self, rots, k, dtype=torch.float32):
         """
         stores few rows of the intercept matrix
         indexing is assumed as follows
@@ -236,7 +236,7 @@ class CreateInterceptMatrix:
         gc.collect()
         torch.cuda.empty_cache()
 
-        for rotation in tqdm(range(rot_start, rot_end), desc='Generating matrix'):
+        for rotation in tqdm(rots, desc='Generating matrix'):
             # for a rotation
             self.intercept_matrix_per(rotation, k, all_rays[:, rotation, :, :])
             # clean up memory
