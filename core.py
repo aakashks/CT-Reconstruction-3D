@@ -242,3 +242,16 @@ class CreateInterceptMatrix:
             # clean up memory
             gc.collect()
             torch.cuda.empty_cache()
+
+
+# functions
+def generate_sinogram(rots, vol_recon, file_path, clip=[10, 17], factor=100):
+    imgs = []
+    for rot in rots:
+        A = torch.load(f'{file_path}/matrix_rot_{rot}.pt')
+        proj = torch.sparse.mm(A, vol_recon.flatten().view(-1, 1))
+        img = proj.view(200, 200) * factor
+        img = torch.clip(img, min=clip[0], max=clip[1])
+        imgs.append(img)
+
+    return imgs

@@ -1,8 +1,11 @@
+import math
+
 import matplotlib.pyplot as plt
 import torch
-import time, gc
+import time
+import gc
 import seaborn as sns
-
+from typing import List
 
 # Measure GPU performance
 # measure performance of any function
@@ -25,14 +28,31 @@ def measure_performance(func, repeats=10, *args, **kwargs):
 
 
 # Plotting Utility functions
-def plot_2d_image(img, cmap="viridis"):
-    sns.heatmap(img, cmap=cmap, xticklabels=False, yticklabels=False)
+def plot_2d_images(images: List[torch.Tensor], ncols=3, cbar=True, figsize=None, cmap="viridis"):
+    n = len(images)
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 3*nrows) if figsize is None else figsize)
+    axes = axes.reshape(nrows, ncols)
+    for i in range(n):
+        sns.heatmap(images[i], ax=axes[i // ncols, i % ncols], square=True, cbar=cbar, cmap=cmap, xticklabels=False, yticklabels=False)
+
+    plt.tight_layout()
     plt.show()
 
 
-def plot_2d_images(
+def plot_images_line(images):
+    fig, axs = plt.subplots(ncols=len(images), squeeze=False)
+    for i, img in enumerate(images):
+        axs[0, i].imshow(img)
+        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+
+def plot_2d_comparison(
         recon_img, orig_img, show_rmse=True, rescale_for_rmse=True, title='', cmap="viridis", figsize=(12, 5)
 ):
+    """
+    compare generated image with a given known image
+    """
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
     for ax, img in zip(axes, [recon_img, orig_img]):
