@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 
 import torch
 from tqdm.auto import tqdm
@@ -46,12 +47,12 @@ class CreateInterceptMatrix:
         self.dtype = dtype
 
     @staticmethod
-    def write_iv_to_storage(sparse_matrix, rot_no):
+    def write_iv_to_storage(sparse_matrix, rot_no, file_path=''):
         # write to 2 files indices and values
-        torch.save(sparse_matrix, f'matrix_rot_{rot_no}.pt')
+        torch.save(sparse_matrix, os.path.join(file_path, f'matrix_rot_{rot_no}.pt'))
         del sparse_matrix
 
-    def intercepts_for_rays(self, ray_coords, dtype=None):
+    def intercepts_for_rays(self, ray_coords, dtype=None, eps=1e-10):
         """
         get all voxel intercepts for 1 ray or a batch of rays
         batches should be on one ray param only for eg. beta only
@@ -82,7 +83,8 @@ class CreateInterceptMatrix:
         # each pixel is represented by its bottom left corner coordinate
         ps = self.ps
         n = self.n
-        sod = self.sod
+        lambd = self.sod
+        gamma = self.sdd
 
         # creating the grid of voxels
         a = torch.arange((-n // 2) * ps, (n // 2) * ps, ps, device=device, dtype=dtype)
@@ -93,22 +95,34 @@ class CreateInterceptMatrix:
         Y = Y.flatten().view(1, -1)
         Z = Z.flatten().view(1, -1)
 
+        sin = torch.sin(phi)
+        cos = torch.cos(phi)
+
         # slopes in parametric form of the 3d ray
-        x_line_slope = sod * torch.sin(phi) - alpha
-        z_line_slope = sod * torch.cos(phi)
+        mx = gamma*sin - alpha*cos
+        mz = gamma*cos + alpha*sin
+
+        xi = lambd*sin
+        zi = lambd*cos
 
         # Defining equations which will generate rays acc to the parametric form
         def xy_from_z(z):
-            return (alpha + z * x_line_slope / z_line_slope,
-                    betas - z * betas / z_line_slope)
+            return (
+                xi + mx*(z-zi)/(mz + eps),
+                -betas*(z-zi)/(mz+eps)
+            )
 
         def yz_from_x(x):
-            return (betas - betas * (x - alpha) / x_line_slope,
-                    (x - alpha) * z_line_slope / x_line_slope)
+            return (
+                -betas*(x-xi)/(mx+eps),
+                zi + mz*(x-xi)/(mx+eps)
+            )
 
         def zx_from_y(y):
-            return (-z_line_slope * (y - betas) / betas,
-                    alpha - x_line_slope * (y - betas) / betas)
+            return (
+                zi - mz*y/(betas + eps),
+                xi - mx*y/(betas + eps)
+            )
 
         # find intercept coordinates at planes
         def intercepts_z_plane(x0, y0, z):
@@ -141,7 +155,9 @@ class CreateInterceptMatrix:
         C2 = torch.abs(intercepts_y_plane(X, Y, Z) - intercepts_y_plane(X, Y + ps, Z))
         C3 = torch.abs(intercepts_x_plane(X, Y, Z) - intercepts_x_plane(X + ps, Y, Z))
 
-        del X, Y, Z, alpha, betas, phi, x_line_slope, z_line_slope
+        del betas
+        del X, Y, Z
+        del alpha, phi, mx, mz, xi, zi
 
         # To get length of line from all these intercept coordinates
         # first we take |x2 - x1|
@@ -171,19 +187,13 @@ class CreateInterceptMatrix:
 
         phis = phis.to(device, dtype).view(-1, 1, 1)
 
-        mu = self.sdd - self.sod
-        lambd = self.sod
-        c = torch.cos(phis)
-        s = torch.sin(phis)
-        a = detector_coords[0]
-        b = detector_coords[1]
-        alphas = (a * lambd + lambd * mu * s) / (a * s + mu + lambd * c ** 2)
-        betas = b / (1 - (mu + alphas * s) / (alphas * s - lambd))
-
+        alphas = detector_coords[0] + torch.zeros_like(phis)
+        betas = detector_coords[1] + torch.zeros_like(phis)
         phis = phis + torch.zeros_like(alphas)
+
         line_params_tensor = torch.stack([phis, alphas, betas], 0)
 
-        del phis, alphas, betas, a, b, detector_coords, c, s, x
+        del phis, alphas, betas, detector_coords, x
         gc.collect()
         torch.cuda.empty_cache()
         return line_params_tensor.to('cpu')
@@ -245,10 +255,10 @@ class CreateInterceptMatrix:
 
 
 # functions
-def generate_sinogram(rots, vol_recon, file_path, clip=[10, 17], factor=100):
+def generate_sinogram(rots, vol_recon, file_path, clip=(10, 17), factor=100):
     imgs = []
     for rot in rots:
-        A = torch.load(f'{file_path}/matrix_rot_{rot}.pt')
+        A = torch.load(os.path.join(file_path, f'matrix_rot_{rot}.pt'))
         proj = torch.sparse.mm(A, vol_recon.flatten().view(-1, 1))
         img = proj.view(200, 200) * factor
         img = torch.clip(img, min=clip[0], max=clip[1])
