@@ -45,40 +45,27 @@ class CreateInterceptMatrix:
 
         assert self.n % 2 == 0, 'if needed revert changes from previous commit'
         self.dtype = dtype
+        self.cache_ic_rot0 = None
 
-    @staticmethod
-    def write_iv_to_storage(sparse_matrix, rot_no, file_path=''):
-        # write to 2 files indices and values
-        torch.save(sparse_matrix, os.path.join(file_path, f'matrix_rot_{rot_no}.pt'))
-        del sparse_matrix
-
-    def intercepts_for_rays(self, ray_coords, dtype=None, eps=1e-10):
+    def intercept_coords(self, detector_coords, dtype=torch.float32, eps=1e-10):
         """
-        get all voxel intercepts for 1 ray or a batch of rays
+        get all voxel intercept_coords for 1 ray or a batch of rays
         batches should be on one ray param only for eg. beta only
         line parameters are taken using centre of object as origin
 
         Parameters
         ----------
-        ray_coords
+        detector_coords
             must be torch tensor on cpu
 
         Returns
         -------
-        sparse_coo Tensor object. size (batches, n*n*n).
+        hybrid sparse coo tensor object. size (batches, n*n*n, 3). where last dim is dense
         where for each batch / row X, Y, Z are flat indexed as they are expected to be
         """
 
-        phi, alpha, betas = (ray_coords[0].view(-1, 1),
-                             ray_coords[1].view(-1, 1),
-                             ray_coords[2].view(-1, 1))
-
-        # option to change data type within method
-        dtype = dtype if dtype is not None else self.dtype
-
-        alpha = alpha.to(device, dtype)
-        betas = betas.to(device, dtype)
-        phi = phi.to(device, dtype)
+        alpha, betas = (detector_coords[0].view(-1, 1).to(device, dtype),
+                        detector_coords[1].view(-1, 1).to(device, dtype))
 
         # each pixel is represented by its bottom left corner coordinate
         ps = self.ps
@@ -95,160 +82,138 @@ class CreateInterceptMatrix:
         Y = Y.flatten().view(1, -1)
         Z = Z.flatten().view(1, -1)
 
-        sin = torch.sin(phi)
-        cos = torch.cos(phi)
-
-        # slopes in parametric form of the 3d ray
-        mx = gamma*sin - alpha*cos
-        mz = gamma*cos + alpha*sin
-
-        xi = lambd*sin
-        zi = lambd*cos
-
         # Defining equations which will generate rays acc to the parametric form
         def xy_from_z(z):
             return (
-                xi + mx*(z-zi)/(mz + eps),
-                -betas*(z-zi)/(mz+eps)
+                -alpha*(z-lambd)/(gamma + eps),
+                -betas*(z-lambd)/(gamma+eps)
             )
 
         def yz_from_x(x):
             return (
-                -betas*(x-xi)/(mx+eps),
-                zi + mz*(x-xi)/(mx+eps)
+                -betas*(x)/(-alpha+eps),
+                lambd + gamma*(x)/(-alpha+eps)
             )
 
         def zx_from_y(y):
             return (
-                zi - mz*y/(betas + eps),
-                xi - mx*y/(betas + eps)
+                lambd - gamma*y/(betas + eps),
+                -alpha*y/(betas + eps)
             )
 
         # find intercept coordinates at planes
         def intercepts_z_plane(x0, y0, z):
             x, y = xy_from_z(z)
             # only True value locations are stored in mask (sparse)
-            mask = ((x0 <= x) & (x < x0 + ps) & (y0 <= y) & (y < y0 + ps)).to_sparse_coo()
+            mask = ((x0 <= x) & (x < x0 + ps) & (y0 <= y) & (y < y0 + ps)).to_sparse()
             del x0, y0
-            i = torch.stack([mask * x, mask * y, mask * z], 0)
-            del mask, x, y, z
-            return i
+            i = torch.stack([(mask * x).values(), (mask * y).values(), (mask * z).values()], -1)
+            del x, y, z
+            return torch.sparse_coo_tensor(mask.indices(), i, (*(mask.size()), 3), dtype=i.dtype, device=device)
 
         def intercepts_x_plane(x, y0, z0):
             y, z = yz_from_x(x)
-            mask = ((y0 <= y) & (y < y0 + ps) & (z0 <= z) & (z < z0 + ps)).to_sparse_coo()
+            mask = ((y0 <= y) & (y < y0 + ps) & (z0 <= z) & (z < z0 + ps)).to_sparse()
             del y0, z0
-            i = torch.stack([mask * x, mask * y, mask * z], 0)
-            del mask, x, y, z
-            return i
+            i = torch.stack([(mask * x).values(), (mask * y).values(), (mask * z).values()], -1)
+            del x, y, z
+            return torch.sparse_coo_tensor(mask.indices(), i, (*(mask.size()), 3), dtype=i.dtype, device=device)
 
         def intercepts_y_plane(x0, y, z0):
             z, x = zx_from_y(y)
-            mask = ((x0 <= x) & (x < x0 + ps) & (z0 <= z) & (z < z0 + ps)).to_sparse_coo()
+            mask = ((x0 <= x) & (x < x0 + ps) & (z0 <= z) & (z < z0 + ps)).to_sparse()
             del x0, z0
-            i = torch.stack([mask * x, mask * y, mask * z], 0)
-            del mask, x, y, z
-            return i
+            i = torch.stack([(mask * x).values(), (mask * y).values(), (mask * z).values()], -1)
+            del x, y, z
+            return torch.sparse_coo_tensor(mask.indices(), i, (*(mask.size()), 3), dtype=i.dtype, device=device)
 
-        # get intercepts with 6 boundaries of each voxel
+        # get intercept_coords with 6 boundaries of each voxel
         C1 = torch.abs(intercepts_z_plane(X, Y, Z) - intercepts_z_plane(X, Y, Z + ps))
         C2 = torch.abs(intercepts_y_plane(X, Y, Z) - intercepts_y_plane(X, Y + ps, Z))
         C3 = torch.abs(intercepts_x_plane(X, Y, Z) - intercepts_x_plane(X + ps, Y, Z))
 
-        del betas
         del X, Y, Z
-        del alpha, phi, mx, mz, xi, zi
+        del betas
 
         # To get length of line from all these intercept coordinates
         # first we take |x2 - x1|
-        ic = torch.abs(torch.abs(C1 - C2) - C3)
+        ic = torch.abs(torch.abs(C1 - C2) - C3).cpu()
         del C1, C2, C3
-        # now squaring will give the length
-        intercept_lengths = torch.sqrt(ic[0] ** 2 + ic[1] ** 2 + ic[2] ** 2)
-        del ic
-
-        # move from GPU
-        il = intercept_lengths.to('cpu')
-        del intercept_lengths
+        del alpha
         gc.collect()
         torch.cuda.empty_cache()
-        return il
+        return ic
 
-    def generate_rays(self, phis, dtype=torch.float32):
+    def detector_coordinates(self, dtype=torch.float32):
         """
-        generate rays from source to each detector for a rotation angle of phi
-        returns shape (3, phis, alphas, betas)
+        generate rays from source to each detector
+        returns shape (2, alphas, betas)
         where alphas = betas = dl = n
         """
         n = self.dl
         ps = self.ps
         x = torch.arange((-n + 1) * ps, n * ps, 2 * ps, device=device, dtype=dtype) / 2
         detector_coords = torch.stack(torch.meshgrid(x, x, indexing='xy'), 0)
-
-        phis = phis.to(device, dtype).view(-1, 1, 1)
-
-        alphas = detector_coords[0] + torch.zeros_like(phis)
-        betas = detector_coords[1] + torch.zeros_like(phis)
-        phis = phis + torch.zeros_like(alphas)
-
-        line_params_tensor = torch.stack([phis, alphas, betas], 0)
-
-        del phis, alphas, betas, detector_coords, x
+        del x
         gc.collect()
         torch.cuda.empty_cache()
-        return line_params_tensor.to('cpu')
+        return detector_coords.to('cpu')
 
-    def intercept_matrix_per(self, rotation, k, all_rays_rot, dtype=torch.float32):
+    def intercept_coords_rot_0(self, k, save=True, file_path='', dtype=torch.float32):
         """
-        for only 1 rotation
-        write to storage sparse tensor of shape (alphas, betas, x, y, z)
+        for only rotation 0
+        cache in RAM a hybrid sparse tensor of shape (alphas * betas, x * y * z, 3)
         x = y = z = n
         with approx n elements for each (alphas, betas, :)
-
-        all_rays_rot
-            all rays for 1 rotation. shape (3, alphas, betas)
 
         k
             no of betas together
             a suitable value can be 100 for colab and kaggle (16GBs). 50 for 8GB (on n=200 case)
-
+            meshgrid size causes the limitation on k
         """
         assert self.n % k == 0
-
-        sparse_matrix = torch.sparse_coo_tensor(size=[0, self.n**3], dtype=dtype)
+        all_rays_rot0 = self.detector_coordinates(dtype=dtype)
+        sparse_matrix = torch.empty([0, self.n**3, 3], dtype=dtype, device=device).to_sparse(2)
 
         for alpha_i in tqdm(range(self.dl), leave=False):
             for betas_i in range(self.dl // k):
                 # peak GPU RAM usage
-                k_rows = self.intercepts_for_rays(all_rays_rot[:, alpha_i, betas_i * k:(betas_i + 1) * k])
-
+                k_rows = self.intercept_coords(all_rays_rot0[:, alpha_i, betas_i * k:(betas_i + 1) * k]).to(device)
                 # concatenating increments size at that dimension and automatically adjusts the indices
-                sparse_matrix = torch.cat([sparse_matrix, k_rows])
-
+                sparse_matrix = torch.cat([sparse_matrix, k_rows], dim=0)
                 del k_rows
 
-            # write the indices and values in storage
-
-        logging.debug(f'rotation {rotation} completed')
-        self.write_iv_to_storage(sparse_matrix, rotation)
+        # store the intercept coords for further calc
+        self.cache_ic_rot0 = sparse_matrix.cpu()
         del sparse_matrix
 
-    def create_intercept_rows(self, rots, k, dtype=torch.float32):
+        # save for future reference
+        if save:
+            torch.save(self.cache_ic_rot0, os.path.join(file_path, 'intercept_coords.pt'))
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def intercept_matrix_rots(self, rots, file_path='', dtype=torch.float32):
         """
-        stores few rows of the intercept matrix
+        stores few rows of the intercept matrix generated by rotating intercept_coords of rotation 0
         indexing is assumed as follows
         for each row (x, y, z).flatten()
         and rows are (phis, alphas, betas).flatten()
         """
-
-        phis = torch.arange(self.p) * self.phi
-        all_rays = self.generate_rays(phis, dtype=dtype)
-        gc.collect()
-        torch.cuda.empty_cache()
-
+        n = self.n
         for rotation in tqdm(rots, desc='Generating matrix'):
+            phi = torch.tensor(rotation * self.phi)
+            c, s = torch.cos(phi), torch.sin(phi)
             # for a rotation
-            self.intercept_matrix_per(rotation, k, all_rays[:, rotation, :, :])
+            rotation_matrix = torch.tensor([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=dtype, device=device).T
+            intercept_coords_0 = self.cache_ic_rot0.to(device)
+
+            values = torch.norm(intercept_coords_0.values().mm(rotation_matrix), dim=1)
+            intercept_lengths = torch.sparse_coo_tensor(intercept_coords_0.indices(), values, size=(self.dl*self.dl, n*n*n))
+            torch.save(intercept_lengths, os.path.join(file_path, f'matrix_rot_{rotation_matrix}.pt'))
+
+            del intercept_coords_0, intercept_lengths, rotation_matrix
             # clean up memory
             gc.collect()
             torch.cuda.empty_cache()
