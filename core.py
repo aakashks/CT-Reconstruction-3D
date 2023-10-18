@@ -45,7 +45,7 @@ class CreateInterceptMatrix:
 
         assert self.n % 2 == 0, 'if needed revert changes from previous commit'
         self.dtype = dtype
-        self.cache_ic_rot0 = None
+        self.cache_ic_rot0_list = None
 
     def intercept_coords(self, detector_coords, dtype=torch.float32, eps=1e-10):
         """
@@ -128,21 +128,16 @@ class CreateInterceptMatrix:
             return torch.sparse_coo_tensor(mask.indices(), i, (*(mask.size()), 3), dtype=i.dtype, device=device)
 
         # get intercept_coords with 6 boundaries of each voxel
-        C1 = torch.abs(intercepts_z_plane(X, Y, Z) - intercepts_z_plane(X, Y, Z + ps))
-        C2 = torch.abs(intercepts_y_plane(X, Y, Z) - intercepts_y_plane(X, Y + ps, Z))
-        C3 = torch.abs(intercepts_x_plane(X, Y, Z) - intercepts_x_plane(X + ps, Y, Z))
+        I = [intercepts_z_plane(X, Y, Z), intercepts_z_plane(X, Y, Z + ps),
+             intercepts_y_plane(X, Y, Z), intercepts_y_plane(X, Y + ps, Z),
+             intercepts_x_plane(X, Y, Z), intercepts_x_plane(X + ps, Y, Z)]
 
         del X, Y, Z
         del betas
-
-        # To get length of line from all these intercept coordinates
-        # first we take |x2 - x1|
-        ic = torch.abs(torch.abs(C1 - C2) - C3).cpu()
-        del C1, C2, C3
         del alpha
         gc.collect()
         torch.cuda.empty_cache()
-        return ic
+        return I
 
     def detector_coordinates(self, dtype=torch.float32):
         """
@@ -173,23 +168,24 @@ class CreateInterceptMatrix:
         """
         assert self.n % k == 0
         all_rays_rot0 = self.detector_coordinates(dtype=dtype)
-        sparse_matrix = torch.empty([0, self.n**3, 3], dtype=dtype, device=device).to_sparse(2)
+        list_sparse_matrix = [torch.empty([0, self.n**3, 3], dtype=dtype, device=device).to_sparse(2) for _ in range(6)]
 
         for alpha_i in tqdm(range(self.dl), leave=False):
             for betas_i in range(self.dl // k):
                 # peak GPU RAM usage
-                k_rows = self.intercept_coords(all_rays_rot0[:, alpha_i, betas_i * k:(betas_i + 1) * k]).to(device)
+                list_k_rows = self.intercept_coords(all_rays_rot0[:, alpha_i, betas_i * k:(betas_i + 1) * k])
                 # concatenating increments size at that dimension and automatically adjusts the indices
-                sparse_matrix = torch.cat([sparse_matrix, k_rows], dim=0)
-                del k_rows
+                for i in range(6):
+                    list_sparse_matrix = torch.cat([list_sparse_matrix[0], list_k_rows[0]], dim=0)
+                del list_k_rows
 
         # store the intercept coords for further calc
-        self.cache_ic_rot0 = sparse_matrix.cpu()
-        del sparse_matrix
+        self.cache_ic_rot0_list = list_sparse_matrix
+        del list_sparse_matrix
 
         # save for future reference
         if save:
-            torch.save(self.cache_ic_rot0, os.path.join(file_path, 'intercept_coords.pt'))
+            torch.save(self.cache_ic_rot0_list, os.path.join(file_path, 'intercept_coords.pt'))
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -207,11 +203,18 @@ class CreateInterceptMatrix:
             c, s = torch.cos(phi), torch.sin(phi)
             # for a rotation
             rotation_matrix = torch.tensor([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=dtype, device=device).T
-            intercept_coords_0 = self.cache_ic_rot0.to(device)
+            I = [self.cache_ic_rot0_list[i].coalesce().to(device) for i in range(6)]
 
-            values = torch.norm(intercept_coords_0.values().mm(rotation_matrix), dim=1)
-            intercept_lengths = torch.sparse_coo_tensor(intercept_coords_0.indices(), values, size=(self.dl*self.dl, n*n*n))
-            torch.save(intercept_lengths, os.path.join(file_path, f'matrix_rot_{rotation_matrix}.pt'))
+            values = [intercept_coords_0.values().mm(rotation_matrix) for intercept_coords_0 in I]
+
+            I_r = [torch.sparse_coo_tensor(I[i].indices(), values[i], size=(self.dl*self.dl, n*n*n)) for i in range(6)]
+            intercept_coords_0 = torch.abs(torch.abs(torch.abs(I_r[0] - I_r[1]) - torch.abs(I_r[2] - I_r[3])) - torch.abs(I_r[4] - I_r[5]))
+
+            intercept_lengths = torch.sparse_coo_tensor(
+                intercept_coords_0.indices(), torch.norm(intercept_coords_0.values(), dim=1),
+                size=(self.dl*self.dl, n*n*n))
+
+            torch.save(intercept_lengths.cpu(), os.path.join(file_path, f'matrix_rot_{rotation}.pt'))
 
             del intercept_coords_0, intercept_lengths, rotation_matrix
             # clean up memory
