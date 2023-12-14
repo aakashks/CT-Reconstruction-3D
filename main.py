@@ -1,12 +1,13 @@
 from utils import *
 from core import *
 
+
 def generate_projections(
     rots, vol_recon, file_path="./data/generated/", clip=(10, 17), factor=100
 ):
     """
     Generate projections for a given list of rotations
-    
+
     Parameters
     ----------
     rots
@@ -31,12 +32,38 @@ def generate_projections(
     return imgs
 
 
-def main(rots, file_path='./data/'):
+def create_intercept_matrices(rots, n=200, k=100):
+    """
+    Create intercept matrices for given list of rotations
     
+    Parameters
+    ----------
+    rots
+        list of rotations to be generated
+    n
+        default resolution
+    k
+        number of rays processed simultaneously (maximum 100 for n=200 and 16GB GPU)
+        
+    """
+    cim = CreateInterceptMatrix(
+        detector_plate_length=n,
+        source_to_detector=200,
+        source_to_object=160,
+        pixel_size=48 / n,
+        projections=n,
+    )
+    cim.create_intercept_rows(rots, k)
+
+
+def main(rots, file_path="./data/"):
     # we are solving the forward problem here
     # for Ax = b we are testing the A matrix for provided reconstruction volume's projection ie. x
     # here we are dealing with each rotation separately
     
+    # create intercept matrices for the given rotations
+    # create_intercept_matrices(rots)
+
     # load data from pt files
     projections = torch.load(file_path + "projections_scaled.pt")
     recons = torch.load(file_path + "recon_scaled.pt")
@@ -50,7 +77,7 @@ def main(rots, file_path='./data/'):
     generated_projections = generate_projections(
         rots, vol_recon=recons_filled, file_path="./data/generated/matrix_200/"
     )
-    
+
     # plot all the generated projections in a single figure to get a rough idea of correctness
     plot_images_line(generated_projections)
     plt.savefig(
