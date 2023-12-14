@@ -31,7 +31,7 @@ class CreateInterceptMatrix:
             prefer using float32 only
         """
         self.dl = detector_plate_length
-        # deliberatly scaling my space by factor of 1/100 so that precision in float32 is better
+        # deliberately scaling my space by factor of 1/100 so that precision in float32 is better
         self.sod = source_to_object / 100
         self.sdd = source_to_detector / 100
         self.ps = pixel_size / 100
@@ -47,7 +47,7 @@ class CreateInterceptMatrix:
         self.dtype = dtype
 
     @staticmethod
-    def write_iv_to_storage(sparse_matrix, rot_no, file_path=''):
+    def write_iv_to_storage(sparse_matrix, rot_no, file_path='./data/generated/'):
         # write to 2 files indices and values
         torch.save(sparse_matrix, os.path.join(file_path, f'matrix_rot_{rot_no}.pt'))
         del sparse_matrix
@@ -252,16 +252,3 @@ class CreateInterceptMatrix:
             # clean up memory
             gc.collect()
             torch.cuda.empty_cache()
-
-
-# functions
-def generate_sinogram(rots, vol_recon, file_path, clip=(10, 17), factor=100):
-    imgs = []
-    for rot in rots:
-        A = torch.load(os.path.join(file_path, f'matrix_rot_{rot}.pt'))
-        proj = torch.sparse.mm(A, vol_recon.flatten().view(-1, 1))
-        img = proj.view(200, 200) * factor
-        img = torch.clip(img, min=clip[0], max=clip[1])
-        imgs.append(img)
-
-    return imgs
