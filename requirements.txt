@@ -1,7 +1,6 @@
 numpy
 matplotlib
-seaborn
-json
-pandas
+# seaborn
+# pandas
 tqdm
 torch
