@@ -1,3 +1,3 @@
 # CT Reconstruction 3D
 
-Computes the exact backprojections of provided sinogram from scratch.
+Code to create intercept matrix for 3D CT reconstruction using Pytorch.
