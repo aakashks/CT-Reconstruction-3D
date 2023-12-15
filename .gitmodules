@@ -1,0 +1,3 @@
+[submodule "2D"]
+	path = CT-Reconstruction-2D
+	url = https://github.com/aakashks/CT-Reconstruction-2D
